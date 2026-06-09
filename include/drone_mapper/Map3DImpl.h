@@ -16,6 +16,15 @@ public:
     [[nodiscard]] types::VoxelOccupancy get(const Position3D& pos) const override;
     [[nodiscard]] PhysicalLength resolution() const override;
 
+    [[nodiscard]] std::size_t width() const;
+    [[nodiscard]] std::size_t height() const;
+    [[nodiscard]] std::size_t depth() const;
+
+    [[nodiscard]] types::VoxelOccupancy getByIndex(
+        std::size_t x_index,
+        std::size_t y_index,
+        std::size_t z_index) const;
+
     void set(const Position3D& pos, types::VoxelOccupancy value) override;
     void save(const std::filesystem::path& path) const override;
 

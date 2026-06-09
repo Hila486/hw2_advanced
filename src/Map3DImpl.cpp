@@ -3,9 +3,12 @@
 #include <TinyNPY.h>
 
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace drone_mapper {
 
@@ -47,6 +50,111 @@ template <typename Length>
             return raw_value > 0 ? toRaw(types::VoxelOccupancy::Occupied)
                                  : toRaw(types::VoxelOccupancy::Unmapped);
     }
+}
+
+template <typename T>
+void copyIntegerValuesFromNpy(NpyArray& loaded_map, std::vector<int>& values) {
+    const T* data = loaded_map.Data<T>();
+
+    if (data == nullptr) {
+        throw std::runtime_error("Failed to access NPY map data.");
+    }
+
+    values.resize(loaded_map.NumValue());
+
+    for (std::size_t i = 0; i < loaded_map.NumValue(); ++i) {
+        values[i] = normalizeRawValue(static_cast<int>(data[i]));
+    }
+}
+
+template <typename T>
+void copyFloatingValuesFromNpy(NpyArray& loaded_map, std::vector<int>& values) {
+    const T* data = loaded_map.Data<T>();
+
+    if (data == nullptr) {
+        throw std::runtime_error("Failed to access NPY map data.");
+    }
+
+    values.resize(loaded_map.NumValue());
+
+    for (std::size_t i = 0; i < loaded_map.NumValue(); ++i) {
+        values[i] = normalizeRawValue(static_cast<int>(std::llround(data[i])));
+    }
+}
+
+/*
+ * TinyNPY does not convert the file type automatically.
+ * Therefore we check the .npy dtype and read it using the matching C++ type.
+ * Example: '|u1' should be read as std::uint8_t, not as int.
+ */
+void copyValuesFromNpy(NpyArray& loaded_map, std::vector<int>& values) {
+    const char type = static_cast<char>(std::abs(static_cast<int>(loaded_map.Type())));
+    const std::size_t word_size = loaded_map.SizeValueBytes();
+
+    if (type == 'i') {
+        if (word_size == 1) {
+            copyIntegerValuesFromNpy<std::int8_t>(loaded_map, values);
+            return;
+        }
+
+        if (word_size == 2) {
+            copyIntegerValuesFromNpy<std::int16_t>(loaded_map, values);
+            return;
+        }
+
+        if (word_size == 4) {
+            copyIntegerValuesFromNpy<std::int32_t>(loaded_map, values);
+            return;
+        }
+
+        if (word_size == 8) {
+            copyIntegerValuesFromNpy<std::int64_t>(loaded_map, values);
+            return;
+        }
+    }
+
+    if (type == 'u') {
+        if (word_size == 1) {
+            copyIntegerValuesFromNpy<std::uint8_t>(loaded_map, values);
+            return;
+        }
+
+        if (word_size == 2) {
+            copyIntegerValuesFromNpy<std::uint16_t>(loaded_map, values);
+            return;
+        }
+
+        if (word_size == 4) {
+            copyIntegerValuesFromNpy<std::uint32_t>(loaded_map, values);
+            return;
+        }
+
+        if (word_size == 8) {
+            copyIntegerValuesFromNpy<std::uint64_t>(loaded_map, values);
+            return;
+        }
+    }
+
+    if (type == 'b') {
+        if (word_size == 1) {
+            copyIntegerValuesFromNpy<std::uint8_t>(loaded_map, values);
+            return;
+        }
+    }
+
+    if (type == 'f') {
+        if (word_size == 4) {
+            copyFloatingValuesFromNpy<float>(loaded_map, values);
+            return;
+        }
+
+        if (word_size == 8) {
+            copyFloatingValuesFromNpy<double>(loaded_map, values);
+            return;
+        }
+    }
+
+    throw std::runtime_error("Unsupported NPY map data type.");
 }
 
 void validateResolution(PhysicalLength resolution) {
@@ -101,16 +209,11 @@ Map3DImpl::Map3DImpl(const std::filesystem::path& path, PhysicalLength resolutio
 
     const std::size_t total_size = width_ * height_ * depth_;
 
-    const int* data = loaded_map.Data<int>();
-    if (data == nullptr) {
-        throw std::runtime_error("Failed to access NPY map data.");
+    if (loaded_map.NumValue() != total_size) {
+        throw std::runtime_error("NPY map size does not match its shape.");
     }
 
-    values_.resize(total_size);
-
-    for (std::size_t i = 0; i < total_size; ++i) {
-        values_[i] = normalizeRawValue(data[i]);
-    }
+    copyValuesFromNpy(loaded_map, values_);
 
     // Maps loaded from file are assumed to start at coordinate 0,0,0.
     origin_x_cm_ = 0.0;
@@ -165,6 +268,29 @@ types::VoxelOccupancy Map3DImpl::get(const Position3D& pos) const {
 
 PhysicalLength Map3DImpl::resolution() const {
     return resolution_;
+}
+
+std::size_t Map3DImpl::width() const {
+    return width_;
+}
+
+std::size_t Map3DImpl::height() const {
+    return height_;
+}
+
+std::size_t Map3DImpl::depth() const {
+    return depth_;
+}
+
+types::VoxelOccupancy Map3DImpl::getByIndex(
+    std::size_t x_index,
+    std::size_t y_index,
+    std::size_t z_index) const {
+    if (x_index >= width_ || y_index >= height_ || z_index >= depth_) {
+        return types::VoxelOccupancy::OutOfBounds;
+    }
+
+    return fromRaw(values_[flatIndex(x_index, y_index, z_index)]);
 }
 
 void Map3DImpl::set(const Position3D& pos, types::VoxelOccupancy value) {
