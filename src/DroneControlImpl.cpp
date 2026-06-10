@@ -6,6 +6,7 @@
 #include <iostream>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace drone_mapper {
 
@@ -35,6 +36,67 @@ types::MovementResult executeMovementCommand(
     return types::MovementResult{false, "Unknown movement command type."};
 }
 
+void writeMappedVoxelsToMap(
+    IMutableMap3D& output_map,
+    const std::vector<types::MappedVoxel>& mapped_voxels) {
+    for (const types::MappedVoxel& voxel : mapped_voxels) {
+        output_map.set(voxel.position, voxel.value);
+    }
+}
+
+types::LidarScanResult scanAndUpdateMap(
+    ILidar& lidar,
+    IMutableMap3D& output_map,
+    IMappingAlgorithm& mapping_algorithm,
+    const types::DroneState& current_state,
+    const Orientation& scan_orientation,
+    const std::string& scan_name) {
+    std::cout << "DroneControl: before " << scan_name << " lidar scan" << std::endl;
+
+    const types::LidarScanResult scan_result =
+        lidar.scan(scan_orientation);
+
+    std::cout << "DroneControl: after " << scan_name << " lidar scan, hits="
+              << scan_result.size() << std::endl;
+
+    if (!scan_result.empty()) {
+        const auto& first_hit = scan_result.front();
+
+        std::cout << "DroneControl: " << scan_name << " first hit details: hit="
+                  << first_hit.hit
+                  << ", distance_cm="
+                  << first_hit.distance.force_numerical_value_in(cm)
+                  << ", horizontal_angle_deg="
+                  << first_hit.angle.horizontal.force_numerical_value_in(deg)
+                  << ", altitude_angle_deg="
+                  << first_hit.angle.altitude.force_numerical_value_in(deg)
+                  << std::endl;
+    }
+
+    std::cout << "DroneControl: converting " << scan_name << " scan to voxels" << std::endl;
+
+    const std::vector<types::MappedVoxel> mapped_voxels =
+        ScanResultToVoxels::convert(
+            current_state.position,
+            current_state.heading,
+            scan_result);
+
+    std::cout << "DroneControl: " << scan_name << " mapped voxels="
+              << mapped_voxels.size() << std::endl;
+
+    std::cout << "DroneControl: writing " << scan_name
+              << " mapped voxels to output map" << std::endl;
+
+    writeMappedVoxelsToMap(output_map, mapped_voxels);
+
+    std::cout << "DroneControl: applying " << scan_name
+              << " voxel updates to algorithm" << std::endl;
+
+    mapping_algorithm.applyVoxelUpdates(mapped_voxels);
+
+    return scan_result;
+}
+
 } // namespace
 
 DroneControlImpl::DroneControlImpl(types::DroneConfigData drone,
@@ -55,61 +117,76 @@ DroneControlImpl::DroneControlImpl(types::DroneConfigData drone,
 types::DroneStepResult DroneControlImpl::step() {
     try {
         /*
-         * One drone-control step:
-         * 1. Read current state from GPS.
-         * 2. Ask lidar for a scan in the current heading.
-         * 3. Convert scan hits into mapped voxels.
-         * 4. Write those voxels into the output map.
-         * 5. Let the mapping algorithm decide the next movement command.
-         * 6. Execute that command using the movement interface.
+         * HW1-style behavior, adapted to HW2:
+         * - DroneControl owns GPS and Lidar usage.
+         * - We scan forward, up, and down.
+         * - All scans update the output map.
+         * - The forward scan is used by the mapping algorithm for movement decision.
          */
 
         std::cout << "DroneControl: getting state" << std::endl;
         const types::DroneState current_state = state();
 
-        std::cout << "DroneControl: before lidar scan" << std::endl;
-        const types::LidarScanResult latest_scan =
-            lidar_.scan(Orientation{});
-        std::cout << "DroneControl: after lidar scan, hits="
-                  << latest_scan.size() << std::endl;
+        const Orientation forward_scan{
+            0.0 * horizontal_angle[deg],
+            0.0 * altitude_angle[deg],
+        };
 
-        if (!latest_scan.empty()) {
-            const auto& first_hit = latest_scan.front();
+        const Orientation up_scan{
+            0.0 * horizontal_angle[deg],
+            90.0 * altitude_angle[deg],
+        };
 
-            std::cout << "DroneControl: first hit details: hit="
-                    << first_hit.hit
-                    << ", distance_cm="
-                    << first_hit.distance.force_numerical_value_in(cm)
-                    << ", horizontal_angle_deg="
-                    << first_hit.angle.horizontal.force_numerical_value_in(deg)
-                    << ", altitude_angle_deg="
-                    << first_hit.angle.altitude.force_numerical_value_in(deg)
-                    << std::endl;
-        }
+        const Orientation down_scan{
+            0.0 * horizontal_angle[deg],
+            -90.0 * altitude_angle[deg],
+        };
 
-        std::cout << "DroneControl: converting scan to voxels" << std::endl;
-        const std::vector<types::MappedVoxel> mapped_voxels =
-            ScanResultToVoxels::convert(
-                current_state.position,
-                current_state.heading,
-                latest_scan);
-        std::cout << "DroneControl: mapped voxels="
-                  << mapped_voxels.size() << std::endl;
+    types::LidarScanResult latest_scan =
+        scanAndUpdateMap(
+            lidar_,
+            output_map_,
+            mapping_algorithm_,
+            current_state,
+            forward_scan,
+            "forward");
 
-        std::cout << "DroneControl: writing mapped voxels to output map" << std::endl;
-        for (const types::MappedVoxel& voxel : mapped_voxels) {
-            output_map_.set(voxel.position, voxel.value);
-        }
+    const types::LidarScanResult up_scan_result =
+        scanAndUpdateMap(
+            lidar_,
+            output_map_,
+            mapping_algorithm_,
+            current_state,
+            up_scan,
+            "up");
 
-        std::cout << "DroneControl: applying voxel updates to algorithm" << std::endl;
-        mapping_algorithm_.applyVoxelUpdates(mapped_voxels);
+    const types::LidarScanResult down_scan_result =
+        scanAndUpdateMap(
+            lidar_,
+            output_map_,
+            mapping_algorithm_,
+            current_state,
+            down_scan,
+            "down");
+
+    latest_scan.insert(
+        latest_scan.end(),
+        up_scan_result.begin(),
+        up_scan_result.end());
+
+    latest_scan.insert(
+        latest_scan.end(),
+        down_scan_result.begin(),
+        down_scan_result.end());
 
         std::cout << "DroneControl: asking algorithm for next move" << std::endl;
+
         const types::MovementCommand command =
             mapping_algorithm_.nextMove(current_state, latest_scan);
 
         std::cout << "DroneControl: executing movement command type="
                   << static_cast<int>(command.type) << std::endl;
+
         const types::MovementResult movement_result =
             executeMovementCommand(movement_, command);
 

@@ -5,4 +5,4 @@ lidar_config:
   z_min_cm: 10
   z_max_cm: 50
   d_cm: 2
-  fov_circles: 1
+  fov_circles: 3

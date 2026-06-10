@@ -2,7 +2,7 @@
 # All distances in centimeters, angles in degrees
 
 simulation_config:
-  map_filename: data_maps/single_voxel_x2_y4_z2.npy
+  map_filename: data_maps/single_voxel_x4_y4_z4.npy
   map_resolution_cm: 10
   initial_drone_position:
     x_cm: 0
