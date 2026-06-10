@@ -1,7 +1,6 @@
 #include <drone_mapper/ScanResultToVoxels.h>
 
 #include <cmath>
-#include <limits>
 #include <vector>
 
 namespace drone_mapper {
@@ -10,6 +9,7 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kRaySampleStepCm = 10.0;
+constexpr double kEpsilon = 0.000001;
 
 [[nodiscard]] double lengthCm(PhysicalLength length) {
     return length.force_numerical_value_in(cm);
@@ -28,7 +28,13 @@ constexpr double kRaySampleStepCm = 10.0;
 }
 
 [[nodiscard]] bool isUsableDistance(double distance_cm) {
-    return std::isfinite(distance_cm) && distance_cm >= 0.0;
+    /*
+     * HW1-aligned behavior:
+     * distance == 0 means the obstacle is closer than lidar z_min.
+     * In that case, we know something is too close, but we do not know the exact cell,
+     * so we should not mark the drone position as Occupied.
+     */
+    return std::isfinite(distance_cm) && distance_cm > 0.0;
 }
 
 [[nodiscard]] Position3D positionAlongRay(
@@ -65,14 +71,17 @@ constexpr double kRaySampleStepCm = 10.0;
         drone_position.z + dz_cm * cm};
 }
 
-void addFreeCellsBeforeHit(
+void addEmptyCellsAlongRay(
     std::vector<types::MappedVoxel>& mapped_voxels,
     const Position3D& drone_position,
     const Orientation& drone_heading,
     const types::LidarHit& lidar_hit,
-    double hit_distance_cm) {
+    double clear_distance_cm,
+    bool include_end_point) {
     for (double ray_distance_cm = 0.0;
-         ray_distance_cm + 0.000001 < hit_distance_cm;
+         include_end_point
+             ? ray_distance_cm <= clear_distance_cm + kEpsilon
+             : ray_distance_cm + kEpsilon < clear_distance_cm;
          ray_distance_cm += kRaySampleStepCm) {
         mapped_voxels.push_back(
             types::MappedVoxel{
@@ -118,16 +127,17 @@ std::vector<types::MappedVoxel> ScanResultToVoxels::convert(
 
         if (lidar_hit.hit) {
             /*
-             * Same as HW1 logic:
-             * - if we hit an obstacle, mark the ray before the hit as Empty
-             * - then mark the hit point as Occupied
+             * HW1 logic:
+             * - cells before the obstacle are Empty
+             * - the hit cell is Occupied
              */
-            addFreeCellsBeforeHit(
+            addEmptyCellsAlongRay(
                 mapped_voxels,
                 drone_position,
                 drone_heading,
                 lidar_hit,
-                distance_cm);
+                distance_cm,
+                false);
 
             addOccupiedHitCell(
                 mapped_voxels,
@@ -138,22 +148,16 @@ std::vector<types::MappedVoxel> ScanResultToVoxels::convert(
         } else {
             /*
              * No obstacle was hit.
-             * The returned distance is the clear distance, either until max range
-             * or until the beam leaves the map.
-             * Mark the whole visible ray as Empty.
+             * The returned distance is the clear distance:
+             * either max range, or the last clear distance before leaving the map.
              */
-            for (double ray_distance_cm = 0.0;
-                 ray_distance_cm <= distance_cm + 0.000001;
-                 ray_distance_cm += kRaySampleStepCm) {
-                mapped_voxels.push_back(
-                    types::MappedVoxel{
-                        positionAlongRay(
-                            drone_position,
-                            drone_heading,
-                            lidar_hit,
-                            ray_distance_cm),
-                        types::VoxelOccupancy::Empty});
-            }
+            addEmptyCellsAlongRay(
+                mapped_voxels,
+                drone_position,
+                drone_heading,
+                lidar_hit,
+                distance_cm,
+                true);
         }
     }
 

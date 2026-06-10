@@ -1,74 +1,134 @@
 #include <drone_mapper/MappingAlgorithmImpl.h>
 
+#include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace drone_mapper {
 
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kObstacleSafetyMarginCm = 10.0;
+constexpr double kRotateRightAngleDeg = 90.0;
+
+[[nodiscard]] double xCm(XLength length) {
+    return length.force_numerical_value_in(cm);
+}
+
+[[nodiscard]] double yCm(YLength length) {
+    return length.force_numerical_value_in(cm);
+}
+
+[[nodiscard]] double zCm(ZLength length) {
+    return length.force_numerical_value_in(cm);
+}
+
+[[nodiscard]] double physicalCm(PhysicalLength length) {
+    return length.force_numerical_value_in(cm);
+}
+
+[[nodiscard]] double horizontalDeg(HorizontalAngle angle) {
+    return angle.force_numerical_value_in(deg);
+}
+
+[[nodiscard]] double degreesToRadians(double degrees) {
+    return degrees * kPi / 180.0;
+}
+
+[[nodiscard]] double preferredAdvanceDistanceCm(const types::MissionConfigData& mission) {
+    /*
+     * We do not have DroneConfigData inside IMappingAlgorithm,
+     * so we use the GPS/map resolution as a conservative movement step.
+     */
+    const double resolution_cm = physicalCm(mission.gps_resolution);
+
+    return std::max(1.0, resolution_cm);
+}
+
+[[nodiscard]] types::MovementCommand rotateRightCommand() {
+    types::MovementCommand command;
+    command.type = types::MovementCommandType::Rotate;
+    command.rotation = types::RotationDirection::Right;
+    command.angle = kRotateRightAngleDeg * deg;
+    return command;
+}
+
+[[nodiscard]] types::MovementCommand advanceCommand(double distance_cm) {
+    types::MovementCommand command;
+    command.type = types::MovementCommandType::Advance;
+    command.distance = distance_cm * cm;
+    return command;
+}
+
+[[nodiscard]] bool hasCloseObstacleAhead(
+    const types::LidarScanResult& latest_scan,
+    double planned_advance_cm) {
+    const double obstacle_threshold_cm =
+        planned_advance_cm + kObstacleSafetyMarginCm;
+
+    for (const types::LidarHit& hit : latest_scan) {
+        if (!hit.hit) {
+            continue;
+        }
+
+        const double distance_cm = physicalCm(hit.distance);
+
+        if (distance_cm > 0.0 && distance_cm <= obstacle_threshold_cm) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+[[nodiscard]] bool advanceWouldLeaveMissionBounds(
+    const types::DroneState& state,
+    const types::MissionConfigData& mission,
+    double advance_distance_cm) {
+    const double heading_rad =
+        degreesToRadians(horizontalDeg(state.heading.horizontal));
+
+    const double next_x =
+        xCm(state.position.x) + advance_distance_cm * std::cos(heading_rad);
+
+    const double next_y =
+        yCm(state.position.y) + advance_distance_cm * std::sin(heading_rad);
+
+    const double current_z = zCm(state.position.z);
+
+    return next_x < xCm(mission.boundaries.min_x) ||
+           next_x > xCm(mission.boundaries.max_x) ||
+           next_y < yCm(mission.boundaries.min_y) ||
+           next_y > yCm(mission.boundaries.max_y) ||
+           current_z < zCm(mission.boundaries.min_height) ||
+           current_z > zCm(mission.boundaries.max_height);
+}
+
+} // namespace
+
 MappingAlgorithmImpl::MappingAlgorithmImpl(types::MissionConfigData mission)
     : mission_(std::move(mission)) {}
 
-types::MovementCommand MappingAlgorithmImpl::nextMove(const types::DroneState& state,
-                                               const types::LidarScanResult& latest_scan) {
-    types::MovementCommand cmd;
-    
-    // Extract numeric values from quantities
-    double pos_x = state.position.x.numerical_value_is_an_implementation_detail_;
-    double pos_y = state.position.y.numerical_value_is_an_implementation_detail_;
-    
-    double min_x = mission_.boundaries.min_x.numerical_value_is_an_implementation_detail_;
-    double max_x = mission_.boundaries.max_x.numerical_value_is_an_implementation_detail_;
-    double min_y = mission_.boundaries.min_y.numerical_value_is_an_implementation_detail_;
-    double max_y = mission_.boundaries.max_y.numerical_value_is_an_implementation_detail_;
-    
-    // Check if we're near boundaries and need to turn or move away
-    const double boundary_margin = 50.0;  // 50 cm safety margin
-    
-    // Check if at boundary and need to turn
-    if ((pos_x <= min_x + boundary_margin && state.heading.horizontal.numerical_value_is_an_implementation_detail_ < 90.0) ||
-        (pos_x >= max_x - boundary_margin && state.heading.horizontal.numerical_value_is_an_implementation_detail_ > 270.0) ||
-        (pos_y <= min_y + boundary_margin && state.heading.horizontal.numerical_value_is_an_implementation_detail_ > 180.0) ||
-        (pos_y >= max_y - boundary_margin && state.heading.horizontal.numerical_value_is_an_implementation_detail_ < 90.0)) {
-        
-        // Rotate 45 degrees to change direction
-        cmd.type = types::MovementCommandType::Rotate;
-        cmd.angle = 45.0 * deg;
-        cmd.rotation = types::RotationDirection::Right;
-        return cmd;
+types::MovementCommand MappingAlgorithmImpl::nextMove(
+    const types::DroneState& state,
+    const types::LidarScanResult& latest_scan) {
+    const double advance_distance_cm = preferredAdvanceDistanceCm(mission_);
+
+    if (hasCloseObstacleAhead(latest_scan, advance_distance_cm)) {
+        return rotateRightCommand();
     }
-    
-    // Check if we can move forward based on lidar data
-    if (!latest_scan.empty()) {
-        // Count obstacles detected
-        int obstacles = 0;
-        for (const auto& hit : latest_scan) {
-            if (hit.hit) {
-                obstacles++;
-            }
-        }
-        
-        // If too many obstacles ahead, turn instead
-        if (static_cast<double>(obstacles) / latest_scan.size() > 0.3) {
-            cmd.type = types::MovementCommandType::Rotate;
-            cmd.angle = 30.0 * deg;
-            cmd.rotation = types::RotationDirection::Right;
-            return cmd;
-        }
+
+    if (advanceWouldLeaveMissionBounds(state, mission_, advance_distance_cm)) {
+        return rotateRightCommand();
     }
-    
-    // Try to advance forward
-    cmd.type = types::MovementCommandType::Advance;
-    cmd.distance = 50.0 * cm;  // Advance 50 cm at a time
-    return cmd;
+
+    return advanceCommand(advance_distance_cm);
 }
 
-void MappingAlgorithmImpl::applyVoxelUpdates(const std::vector<types::MappedVoxel>& voxels) {
-    // In a more sophisticated implementation, we would:
-    // - Track which areas have been explored
-    // - Update exploration priorities based on found voxels
-    // - Adjust strategy based on map density
-    
-    // For now, we just accept the updates without processing
-    (void)voxels;
+void MappingAlgorithmImpl::applyVoxelUpdates(
+    const std::vector<types::MappedVoxel>& voxels) {
+    known_voxel_updates_ += voxels.size();
 }
 
 } // namespace drone_mapper
