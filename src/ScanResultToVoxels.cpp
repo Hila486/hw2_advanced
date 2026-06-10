@@ -1,12 +1,15 @@
 #include <drone_mapper/ScanResultToVoxels.h>
 
 #include <cmath>
-#include <numbers>
+#include <limits>
 #include <vector>
 
 namespace drone_mapper {
 
 namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kRaySampleStepCm = 10.0;
 
 [[nodiscard]] double lengthCm(PhysicalLength length) {
     return length.force_numerical_value_in(cm);
@@ -21,73 +24,137 @@ namespace {
 }
 
 [[nodiscard]] double degreesToRadians(double degrees) {
-    return degrees * std::numbers::pi / 180.0;
+    return degrees * kPi / 180.0;
 }
 
-[[nodiscard]] bool isUsableHit(const types::LidarHit& hit) {
-    if (!hit.hit) {
-        return false;
-    }
-
-    const double distance_cm = lengthCm(hit.distance);
-
-    /*
-     * distance == 0 means the object is closer than lidar z_min.
-     * The lidar knows something is too close, but not exactly where,
-     * so for now we do not create a voxel from that hit.
-     */
-    return std::isfinite(distance_cm) && distance_cm > 0.0;
+[[nodiscard]] bool isUsableDistance(double distance_cm) {
+    return std::isfinite(distance_cm) && distance_cm >= 0.0;
 }
 
-[[nodiscard]] Position3D hitToPosition(
-    const Position3D& scan_origin,
+[[nodiscard]] Position3D positionAlongRay(
+    const Position3D& drone_position,
     const Orientation& drone_heading,
-    const types::LidarHit& hit) {
-    /*
-     * LidarHit::angle is relative to the drone/sensor direction.
-     * To place the hit in the world map, convert it to an absolute direction.
-     */
-    const double horizontal_rad = degreesToRadians(
+    const types::LidarHit& lidar_hit,
+    double distance_cm) {
+    const double absolute_horizontal_deg =
         horizontalDeg(drone_heading.horizontal) +
-        horizontalDeg(hit.angle.horizontal));
+        horizontalDeg(lidar_hit.angle.horizontal);
 
-    const double altitude_rad = degreesToRadians(
+    const double absolute_altitude_deg =
         altitudeDeg(drone_heading.altitude) +
-        altitudeDeg(hit.angle.altitude));
+        altitudeDeg(lidar_hit.angle.altitude);
 
-    const double distance_cm = lengthCm(hit.distance);
+    const double horizontal_rad = degreesToRadians(absolute_horizontal_deg);
+    const double altitude_rad = degreesToRadians(absolute_altitude_deg);
 
-    const double horizontal_distance_cm = distance_cm * std::cos(altitude_rad);
+    const double horizontal_distance_cm =
+        distance_cm * std::cos(altitude_rad);
 
-    const double dx_cm = horizontal_distance_cm * std::cos(horizontal_rad);
-    const double dy_cm = horizontal_distance_cm * std::sin(horizontal_rad);
-    const double dz_cm = distance_cm * std::sin(altitude_rad);
+    const double dx_cm =
+        horizontal_distance_cm * std::cos(horizontal_rad);
+
+    const double dy_cm =
+        horizontal_distance_cm * std::sin(horizontal_rad);
+
+    const double dz_cm =
+        distance_cm * std::sin(altitude_rad);
 
     return Position3D{
-        scan_origin.x + dx_cm * cm,
-        scan_origin.y + dy_cm * cm,
-        scan_origin.z + dz_cm * cm};
+        drone_position.x + dx_cm * cm,
+        drone_position.y + dy_cm * cm,
+        drone_position.z + dz_cm * cm};
+}
+
+void addFreeCellsBeforeHit(
+    std::vector<types::MappedVoxel>& mapped_voxels,
+    const Position3D& drone_position,
+    const Orientation& drone_heading,
+    const types::LidarHit& lidar_hit,
+    double hit_distance_cm) {
+    for (double ray_distance_cm = 0.0;
+         ray_distance_cm + 0.000001 < hit_distance_cm;
+         ray_distance_cm += kRaySampleStepCm) {
+        mapped_voxels.push_back(
+            types::MappedVoxel{
+                positionAlongRay(
+                    drone_position,
+                    drone_heading,
+                    lidar_hit,
+                    ray_distance_cm),
+                types::VoxelOccupancy::Empty});
+    }
+}
+
+void addOccupiedHitCell(
+    std::vector<types::MappedVoxel>& mapped_voxels,
+    const Position3D& drone_position,
+    const Orientation& drone_heading,
+    const types::LidarHit& lidar_hit,
+    double hit_distance_cm) {
+    mapped_voxels.push_back(
+        types::MappedVoxel{
+            positionAlongRay(
+                drone_position,
+                drone_heading,
+                lidar_hit,
+                hit_distance_cm),
+            types::VoxelOccupancy::Occupied});
 }
 
 } // namespace
 
 std::vector<types::MappedVoxel> ScanResultToVoxels::convert(
-    const Position3D& scan_origin,
+    const Position3D& drone_position,
     const Orientation& drone_heading,
-    const types::LidarScanResult& scan) {
+    const types::LidarScanResult& scan_result) {
     std::vector<types::MappedVoxel> mapped_voxels;
 
-    mapped_voxels.reserve(scan.size());
+    for (const types::LidarHit& lidar_hit : scan_result) {
+        const double distance_cm = lengthCm(lidar_hit.distance);
 
-    for (const types::LidarHit& hit : scan) {
-        if (!isUsableHit(hit)) {
+        if (!isUsableDistance(distance_cm)) {
             continue;
         }
 
-        mapped_voxels.push_back(
-            types::MappedVoxel{
-                hitToPosition(scan_origin, drone_heading, hit),
-                types::VoxelOccupancy::Occupied});
+        if (lidar_hit.hit) {
+            /*
+             * Same as HW1 logic:
+             * - if we hit an obstacle, mark the ray before the hit as Empty
+             * - then mark the hit point as Occupied
+             */
+            addFreeCellsBeforeHit(
+                mapped_voxels,
+                drone_position,
+                drone_heading,
+                lidar_hit,
+                distance_cm);
+
+            addOccupiedHitCell(
+                mapped_voxels,
+                drone_position,
+                drone_heading,
+                lidar_hit,
+                distance_cm);
+        } else {
+            /*
+             * No obstacle was hit.
+             * The returned distance is the clear distance, either until max range
+             * or until the beam leaves the map.
+             * Mark the whole visible ray as Empty.
+             */
+            for (double ray_distance_cm = 0.0;
+                 ray_distance_cm <= distance_cm + 0.000001;
+                 ray_distance_cm += kRaySampleStepCm) {
+                mapped_voxels.push_back(
+                    types::MappedVoxel{
+                        positionAlongRay(
+                            drone_position,
+                            drone_heading,
+                            lidar_hit,
+                            ray_distance_cm),
+                        types::VoxelOccupancy::Empty});
+            }
+        }
     }
 
     return mapped_voxels;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <cmath>
 
 namespace drone_mapper {
 
@@ -42,8 +43,13 @@ types::LidarScanResult MockLidar::scan(Orientation scan_orientation) const {
         scan_orientation.altitude + sensor_heading.altitude,
     };
 
-    const PhysicalLength center_distance = traceBeam(center_beam_abs);
-    results.push_back(types::LidarHit{center_distance <= config_.z_max, center_distance, scan_orientation});
+    const BeamTraceResult center_trace = traceBeam(center_beam_abs);
+
+    results.push_back(
+        types::LidarHit{
+            center_trace.hit,
+            center_trace.distance,
+            scan_orientation});
 
     for (std::size_t circle = 1; circle < config_.fov_circles; ++circle) {
         const std::size_t beam_count = beams_on_circle(circle);
@@ -66,44 +72,70 @@ types::LidarScanResult MockLidar::scan(Orientation scan_orientation) const {
                 relative_beam.horizontal + sensor_heading.horizontal,
                 relative_beam.altitude + sensor_heading.altitude,
             };
-            const PhysicalLength distance = traceBeam(absolute_beam);
-            results.push_back(types::LidarHit{distance <= config_.z_max, distance, relative_beam});
+            const BeamTraceResult trace = traceBeam(absolute_beam);
+
+            results.push_back(
+                types::LidarHit{
+                    trace.hit,
+                    trace.distance,
+                    relative_beam});
         }
     }
 
     return results;
 }
 
-PhysicalLength MockLidar::traceBeam(const Orientation& beam_orientation) const {
+MockLidar::BeamTraceResult MockLidar::traceBeam(const Orientation& beam_orientation) const {
     const Position3D origin = gps_.position();
-    const auto cos_altitude = si::cos(beam_orientation.altitude);
-    const auto dx = cos_altitude * si::cos(beam_orientation.horizontal);
-    const auto dy = cos_altitude * si::sin(beam_orientation.horizontal);
-    const auto dz = si::sin(beam_orientation.altitude);
 
-    // step based on size of the map's resolution
+    constexpr double pi = 3.14159265358979323846;
+
+    const double horizontal_deg =
+        beam_orientation.horizontal.force_numerical_value_in(deg);
+
+    const double altitude_deg =
+        beam_orientation.altitude.force_numerical_value_in(deg);
+
+    const double horizontal_rad = horizontal_deg * pi / 180.0;
+    const double altitude_rad = altitude_deg * pi / 180.0;
+
+    const double cos_altitude = std::cos(altitude_rad);
+
+    const double dir_x = cos_altitude * std::cos(horizontal_rad);
+    const double dir_y = cos_altitude * std::sin(horizontal_rad);
+    const double dir_z = std::sin(altitude_rad);
+
     const PhysicalLength step = 0.1 * map_.resolution();
 
-    for (PhysicalLength distance = 0.0 * cm; distance <= config_.z_max; distance += step) {
-        // Computing target voxel position
+    PhysicalLength last_clear_distance = 0.0 * cm;
+
+    for (PhysicalLength distance = step; distance <= config_.z_max; distance += step) {
         const double distance_cm = distance.force_numerical_value_in(cm);
-        const double dir_x = dx.force_numerical_value_in(mp::one);
-        const double dir_y = dy.force_numerical_value_in(mp::one);
-        const double dir_z = dz.force_numerical_value_in(mp::one);
 
         const Position3D sample{
             origin.x + dir_x * distance_cm * x_extent[cm],
             origin.y + dir_y * distance_cm * y_extent[cm],
             origin.z + dir_z * distance_cm * z_extent[cm],
         };
-        if (map_.get(sample) == types::VoxelOccupancy::Occupied) {
-            if (distance < config_.z_min) {
-                return 0.0 * cm;
-            }
-            return distance;
+
+        const types::VoxelOccupancy cell = map_.get(sample);
+
+        if (cell == types::VoxelOccupancy::OutOfBounds) {
+            return BeamTraceResult{false, last_clear_distance};
         }
+
+        if (cell == types::VoxelOccupancy::Occupied) {
+            if (distance < config_.z_min) {
+                return BeamTraceResult{true, 0.0 * cm};
+            }
+
+            return BeamTraceResult{true, distance};
+        }
+
+        last_clear_distance = distance;
     }
-    return std::numeric_limits<double>::max() * cm;
+
+    return BeamTraceResult{false, config_.z_max};
 }
 
 } // namespace drone_mapper

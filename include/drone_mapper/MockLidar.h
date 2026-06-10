@@ -13,7 +13,12 @@ public:
     [[nodiscard]] types::LidarScanResult scan(Orientation scan_orientation) const override;
 
 private:
-    [[nodiscard]] PhysicalLength traceBeam(const Orientation& beam) const;
+    struct BeamTraceResult {
+        bool hit;
+        PhysicalLength distance;
+    };
+
+    [[nodiscard]] BeamTraceResult traceBeam(const Orientation& beam) const;
 
     types::LidarConfigData config_;
     const IMap3D& map_;
