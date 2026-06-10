@@ -1,53 +1,83 @@
+#include <drone_mapper/ConfigParser.h>
 #include <drone_mapper/SimulationManager.h>
 #include <drone_mapper/SimulationRunFactoryImpl.h>
 
+#include <exception>
 #include <filesystem>
 #include <iostream>
 #include <memory>
 
+namespace {
+
+std::filesystem::path getCompositionFile(int argc, char** argv) {
+    if (argc >= 2) {
+        return std::filesystem::path{argv[1]};
+    }
+
+    return std::filesystem::path{"simulation.yaml"};
+}
+
+std::filesystem::path getOutputPath(int argc, char** argv) {
+    if (argc >= 3) {
+        return std::filesystem::path{argv[2]};
+    }
+
+    return std::filesystem::current_path();
+}
+
+} // namespace
+
 int main(int argc, char** argv) {
-    const std::filesystem::path composition_file =
-        (argc >= 2) ? std::filesystem::path{argv[1]} : std::filesystem::path{"simulation.yaml"};
-    const std::filesystem::path output_path =
-        (argc >= 3) ? std::filesystem::path{argv[2]} : std::filesystem::current_path();
+    if (argc > 3) {
+        std::cerr << "Usage: ./drone_mapper_simulation [<simulation.yaml>] [<output_path>]\n";
+        return 1;
+    }
 
-    auto run_factory = std::make_unique<drone_mapper::SimulationRunFactoryImpl>();
-    drone_mapper::SimulationManager simulation{std::move(run_factory)};
+    try {
+        const std::filesystem::path composition_file = getCompositionFile(argc, argv);
+        const std::filesystem::path output_path = getOutputPath(argc, argv);
 
-    const drone_mapper::types::MappingBounds bounds{
-        -500.0 * drone_mapper::x_extent[drone_mapper::cm],
-        500.0 * drone_mapper::x_extent[drone_mapper::cm],
-        -500.0 * drone_mapper::y_extent[drone_mapper::cm],
-        500.0 * drone_mapper::y_extent[drone_mapper::cm],
-        0.0 * drone_mapper::z_extent[drone_mapper::cm],
-        300.0 * drone_mapper::z_extent[drone_mapper::cm],
-    };
-    drone_mapper::types::SimulationCompositionData composition{
-        composition_file,
-        {drone_mapper::types::SimulationConfigData{
-            "data_maps/single_voxel_x2_y4_z2.npy",
-            10.0 * drone_mapper::cm,
-            drone_mapper::Position3D{},
-            0.0 * drone_mapper::horizontal_angle[drone_mapper::deg],
-        }},
-        {drone_mapper::types::MissionConfigData{1, bounds, 10.0 * drone_mapper::cm, 1}},
-        {drone_mapper::types::DroneConfigData{
-            30.0 * drone_mapper::cm,
-            45.0 * drone_mapper::horizontal_angle[drone_mapper::deg],
-            50.0 * drone_mapper::cm,
-            40.0 * drone_mapper::cm,
-        }},
-        {drone_mapper::types::LidarConfigData{
-            20.0 * drone_mapper::cm,
-            120.0 * drone_mapper::cm,
-            2.5 * drone_mapper::cm,
-            5,
-        }},
-    };
-    const drone_mapper::types::SimulationReport report = simulation.run(composition, output_path);
+        std::cout << "Composition file: " << composition_file << std::endl;
+        std::cout << "Output path: " << output_path << std::endl;
 
-    std::cout << "Assignment 2 simulator skeleton ran "
-              << report.simulations.size()
-              << " score group(s).\n";
-    return 0;
+        std::filesystem::create_directories(output_path);
+
+        std::cout << "Parsing composition..." << std::endl;
+
+        const drone_mapper::types::SimulationCompositionData composition =
+            drone_mapper::ConfigParser::parseSimulationComposition(composition_file);
+
+        std::cout << "Finished parsing composition." << std::endl;
+        std::cout << "Simulations: " << composition.simulations.size() << std::endl;
+        std::cout << "Missions: " << composition.missions.size() << std::endl;
+        std::cout << "Drones: " << composition.drones.size() << std::endl;
+        std::cout << "Lidars: " << composition.lidars.size() << std::endl;
+
+        auto run_factory = std::make_unique<drone_mapper::SimulationRunFactoryImpl>();
+
+        drone_mapper::SimulationManager simulation_manager{std::move(run_factory)};
+
+        std::cout << "Starting SimulationManager..." << std::endl;
+
+        const drone_mapper::types::SimulationReport report =
+            simulation_manager.run(composition, output_path);
+
+        std::cout << "Finished SimulationManager." << std::endl;
+
+        std::cout << "Simulation completed with "
+                  << report.simulations.size()
+                  << " score group(s).\n";
+
+        std::cout << "Results written to: "
+                  << (output_path / "simulation_output.yaml")
+                  << '\n';
+
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "Simulation failed: " << error.what() << '\n';
+        return 1;
+    } catch (...) {
+        std::cerr << "Simulation failed: unknown error.\n";
+        return 1;
+    }
 }
