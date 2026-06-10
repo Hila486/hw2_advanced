@@ -1,6 +1,3 @@
-# Sample simulation configuration for testing
-# All distances in centimeters, angles in degrees
-
 simulation_config:
   map_filename: data_maps/two_full_x_planes_plus_upper_pattern.npy
   map_resolution_cm: 10
