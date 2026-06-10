@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -13,8 +14,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include <iostream>
-
 
 namespace drone_mapper {
 
@@ -83,6 +82,66 @@ namespace {
     }
 
     return "IGNORED";
+}
+
+[[nodiscard]] std::string paddedRunIndex(std::size_t run_index) {
+    std::ostringstream stream;
+    stream << std::setw(4) << std::setfill('0') << run_index;
+    return stream.str();
+}
+
+[[nodiscard]] std::string mapStemForPath(const std::filesystem::path& map_filename) {
+    const std::string stem = map_filename.stem().string();
+
+    if (stem.empty()) {
+        return "unknown_map";
+    }
+
+    return stem;
+}
+
+[[nodiscard]] std::filesystem::path writeRunErrorLog(
+    const std::filesystem::path& output_path,
+    std::size_t run_index,
+    const types::SimulationConfigData& simulation,
+    const std::string& message) {
+    const std::filesystem::path error_dir =
+        output_path /
+        "output_results" /
+        ("run_" + paddedRunIndex(run_index) + "_" +
+         mapStemForPath(simulation.map_filename) + "_error");
+
+    std::filesystem::create_directories(error_dir);
+
+    const std::filesystem::path error_file = error_dir / "error.log";
+    std::ofstream output{error_file};
+
+    if (output) {
+        output << "Simulation run failed\n";
+        output << "run_index: " << run_index << "\n";
+        output << "map_filename: " << simulation.map_filename.string() << "\n";
+        output << "message: " << message << "\n";
+    }
+
+    return error_file;
+}
+
+[[nodiscard]] types::MissionRunResult makeErrorRunResult(
+    const std::filesystem::path& output_path,
+    std::size_t run_index,
+    const types::SimulationConfigData& simulation,
+    const std::string& code,
+    const std::string& message) {
+    types::MissionRunResult result;
+    result.status = types::MissionRunStatus::Error;
+    result.steps = 0;
+    result.score = -1.0;
+    result.output_map_file =
+        writeRunErrorLog(output_path, run_index, simulation, message);
+    result.error.code = code;
+    result.error.message = message;
+
+    return result;
 }
 
 struct ReportSummary {
@@ -181,7 +240,14 @@ void writeSimulationOutputYaml(
             output << "          status: " << quote(missionRunStatusToString(run.status)) << "\n";
             output << "          steps: " << run.steps << "\n";
             output << "          score: " << run.score << "\n";
-            output << "          output_map_file: " << quote(run.output_map_file.string()) << "\n";
+
+            if (run.status == types::MissionRunStatus::Error) {
+                output << "          error_log_file: "
+                       << quote(run.output_map_file.string()) << "\n";
+            } else {
+                output << "          output_map_file: "
+                       << quote(run.output_map_file.string()) << "\n";
+            }
 
             if (run.status == types::MissionRunStatus::Error || !run.error.code.empty()) {
                 output << "          error_ref:\n";
@@ -232,20 +298,51 @@ types::SimulationReport SimulationManager::run(
                 for (const types::LidarConfigData& lidar : composition.lidars) {
                     std::cout << "Creating run #" << run_index << std::endl;
 
-                    std::unique_ptr<ISimulationRun> run =
-                        run_factory_->create(simulation, mission, drone, lidar, output_path);
+                    try {
+                        std::unique_ptr<ISimulationRun> run =
+                            run_factory_->create(
+                                simulation,
+                                mission,
+                                drone,
+                                lidar,
+                                output_path);
 
-                    std::cout << "Created run #" << run_index << ". Starting run..." << std::endl;
+                        std::cout << "Created run #" << run_index
+                                  << ". Starting run..." << std::endl;
 
-                    types::MissionRunResult result = run->run();
+                        types::MissionRunResult result = run->run();
 
-                    std::cout << "Finished run #" << run_index
-                              << ": status=" << static_cast<int>(result.status)
-                              << ", steps=" << result.steps
-                              << ", score=" << result.score
-                              << std::endl;
+                        std::cout << "Finished run #" << run_index
+                                  << ": status=" << static_cast<int>(result.status)
+                                  << ", steps=" << result.steps
+                                  << ", score=" << result.score
+                                  << std::endl;
 
-                    results.push_back(std::move(result));
+                        results.push_back(std::move(result));
+                    } catch (const std::exception& error) {
+                        std::cout << "Run #" << run_index
+                                  << " failed: " << error.what() << std::endl;
+
+                        results.push_back(
+                            makeErrorRunResult(
+                                output_path,
+                                run_index,
+                                simulation,
+                                "RUN_FAILED",
+                                error.what()));
+                    } catch (...) {
+                        std::cout << "Run #" << run_index
+                                  << " failed with unknown error." << std::endl;
+
+                        results.push_back(
+                            makeErrorRunResult(
+                                output_path,
+                                run_index,
+                                simulation,
+                                "RUN_FAILED",
+                                "Unknown simulation run error."));
+                    }
+
                     ++run_index;
                 }
             }
